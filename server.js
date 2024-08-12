@@ -7,9 +7,11 @@ import schedule from 'node-schedule';
 import fs from 'fs';
 import Pushover from 'pushover-notifications';
 const rpcEndpoints = JSON.parse(fs.readFileSync('rpc_endpoints.json', 'utf8'));
+import readline from 'readline';
 
 // Configuration
 const mainnetNodeName = process.env.MAINNET_NODE_NAME;
+const testnetNodeName = process.env.TESTNET_NODE_NAME;
 const pushoverEnabled = process.env.PUSHOVER !== 'false'; // Check if Pushover is enabled
 
 // Global object to track unregistration status
@@ -63,7 +65,6 @@ async function unregisterProducer(unregKey, producer, networkType) {
     const networkInfo = rpcEndpoints[networkType];
     const endpoints = networkInfo.endpoints;
     const chainId = networkInfo.chainId;  // Get the chainId from the JSON file
-
 
     const walletPlugin = new WalletPluginPrivateKey(unregKey);
 
@@ -166,6 +167,81 @@ async function checkMissedBlocks(producer, url) {
   }
 }
 
+// Function to check log 
+async function checkSyncedLog(networkType) {
+  const filePath = networkType === 'mainnet' ? process.env.MAINNET_LOG_PATH : process.env.TESTNET_LOG_PATH;
+  const fileExists = fs.promises.stat(filePath).then(() => true, () => false);
+  if (fileExists) {
+    console.log('Reading Log file: ', filePath)
+    await readLastLine(filePath)
+      .then(lastLine => {
+          console.log('Last line:', lastLine);
+          return validateLogTime(lastLine);
+      })
+      .catch(err => {
+          console.error('Error reading file:', err);
+      });
+  } else {
+    console.error('Path for log does not exists! ... skipping');
+  }
+  return false;
+}
+
+async function readLastLine(filePath) {
+  try{
+    const fileSize = fs.statSync(filePath).size - 1024
+    if(fileSize > 0){
+      const fileStream = fs.createReadStream(filePath, {
+        encoding: 'utf8',
+        start: fs.statSync(filePath).size - 1024, // Start reading from the last 1KB
+      });
+
+      const rl = readline.createInterface({
+          input: fileStream,
+          crlfDelay: Infinity,
+      });
+
+      let lastLine = '';
+      for await (const line of rl) {
+          lastLine = line;
+      }
+      return lastLine;  
+    }else{
+      console.log('Log file is less than 1KB');
+      return '';
+    }
+    
+  } catch(error){
+    console.log('Error reading file: ', error);
+  }
+}
+
+function validateLogTime(logLine) {
+  const regex = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}/g;
+  const matches = logLine.match(regex);
+  if (matches && matches.length > 0) {
+    const lastMatch = matches[matches.length - 1];
+    console.log('Last time: ', lastMatch);
+    const unixTimeZero = new Date(lastMatch+'Z');
+    const currentDate = new Date().getTime();
+    // console.log(new Date(unixTimeZero).toISOString());
+    // console.log(new Date().toISOString());
+    const timeDiff = currentDate - unixTimeZero;
+    const maxAllowedDiff = process.env.MAX_LOG_DIFF_TIME;
+    if (timeDiff < maxAllowedDiff) {
+      return true;
+    } else {
+      const diffInMinutes = Math.floor(timeDiff / (1000 * 60));
+      const diffInHours = Math.floor(timeDiff / (1000 * 60 * 60));
+      console.error('Diff in minutes: ', diffInMinutes);
+      console.error('Diff in hrs: ', diffInHours);
+    }
+  } else {
+      console.error('Unable to get time from logs...');
+  }
+  return false;
+}
+
 
 async function checkUnregstatus(nodeName, networkType) {
    
@@ -200,7 +276,7 @@ async function monitorProducers() {
   isRunning = true;
   try {
     const unregKey = process.env.UNREG_KEY; 
-    const testnetNodeName = process.env.TESTNET_NODE_NAME;
+    
     const missed_rounds = process.env.MISSED_ROUNDS || 1;
     //const pushoverEnabled = process.env.PUSHOVER !== 'false'; // Check if Pushover is enabled
     
@@ -208,15 +284,34 @@ async function monitorProducers() {
     const endDate = new Date(currentDate.getTime() - 180000); //3 minutes ago
     const startDate = new Date(currentDate.getTime() - 240000);  //4 minutes ago
 
-    
-
     const urls = {
       mainnet: `https://missm.sentnl.io/missing-blocks?ownerName=${mainnetNodeName}&startDate=${startDate.toISOString()}&endDate=${endDate.toISOString()}`,
       testnet: `http://misst.sentnl.io/missing-blocks?ownerName=${testnetNodeName}&startDate=${startDate.toISOString()}&endDate=${endDate.toISOString()}`,
     };
 
     for (const [networkType, url] of Object.entries(urls)) {
+      if (networkType === 'mainnet' && (mainnetNodeName == null || mainnetNodeName == undefined || mainnetNodeName == "")) {
+        console.log('Mainnet not specified, skipping to testnet... ')
+        continue;
+      }
+      if (networkType === 'testnet' && (testnetNodeName == null || testnetNodeName == undefined || testnetNodeName == "")) {
+        console.log('Testnet not specified, skipping run... ')
+        continue;
+      }
+
       const nodeName = networkType === 'mainnet' ? mainnetNodeName : testnetNodeName;
+      console.log('Checking Logs....');
+      const syncedLog = await checkSyncedLog(networkType);
+      if(!syncedLog){
+        try{
+          console.log(`Producer Log is not synced ${networkType}, unreg now...`);
+          await unregisterProducer(unregKey, nodeName, networkType);
+          return;
+        }catch(error){
+          console.log(`Failed to unregister producer ${nodeName} on ${networkType}:`, error);
+        }
+      }
+      
       const nodeKey = `${nodeName}-${networkType}`;
       const missedBlocks = await checkMissedBlocks(nodeName, url);
       const threshold = 12 * missed_rounds;
@@ -296,7 +391,8 @@ async function monitorProducers() {
 function main() {
   // Schedule the monitoring function to run every 30 seconds
   schedule.scheduleJob('*/30 * * * * *', monitorProducers);
-  console.log(`Monitoring has started for ${mainnetNodeName}, checking mainnet and testnet producers every minute.`);
+  const activeBp = mainnetNodeName ? mainnetNodeName : testnetNodeName;
+  console.log(`Monitoring has started for ${activeBp}, checking mainnet and testnet producers every minute.`);
 
 }
 
