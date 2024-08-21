@@ -67,14 +67,17 @@ async function unregisterProducer(unregKey, producer, networkType) {
     const chainId = networkInfo.chainId;  // Get the chainId from the JSON file
 
     const walletPlugin = new WalletPluginPrivateKey(unregKey);
-
+    let permission = "unregprod"
+    if( process.env.UNREG_PERMISSION ) { 
+      permission = permission = process.env.UNREG_PERMISSION;
+    } 
     // Define the action to unregister the producer
     const unregprod = {
       account: 'eosio',
       name: 'unregprod',
       authorization: [{
         actor: producer,
-        permission: 'unregprod',
+        permission: permission,
       }],
       data: {
         producer: producer,
@@ -93,7 +96,7 @@ async function unregisterProducer(unregKey, producer, networkType) {
         // Reinitialize the session with the updated chain object
         const session = new Session({
           actor: producer,
-          permission: 'unregprod',
+          permission: permission,
           chain,
           walletPlugin,
         });
@@ -171,12 +174,13 @@ async function checkMissedBlocks(producer, url) {
 async function checkSyncedLog(networkType) {
   const filePath = networkType === 'mainnet' ? process.env.MAINNET_LOG_PATH : process.env.TESTNET_LOG_PATH;
   const fileExists = fs.promises.stat(filePath).then(() => true, () => false);
+  var isValid = false;
   if (fileExists) {
     console.log('Reading Log file: ', filePath)
     await readLastLine(filePath)
       .then(lastLine => {
           console.log('Last line:', lastLine);
-          return validateLogTime(lastLine);
+          isValid = validateLogTime(lastLine);
       })
       .catch(err => {
           console.error('Error reading file:', err);
@@ -184,7 +188,7 @@ async function checkSyncedLog(networkType) {
   } else {
     console.error('Path for log does not exists! ... skipping');
   }
-  return false;
+  return isValid;
 }
 
 async function readLastLine(filePath) {
@@ -219,6 +223,7 @@ async function readLastLine(filePath) {
 function validateLogTime(logLine) {
   const regex = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}/g;
   const matches = logLine.match(regex);
+  var isValid = false;
   if (matches && matches.length > 0) {
     const lastMatch = matches[matches.length - 1];
     console.log('Last time: ', lastMatch);
@@ -229,7 +234,7 @@ function validateLogTime(logLine) {
     const timeDiff = currentDate - unixTimeZero;
     const maxAllowedDiff = process.env.MAX_LOG_DIFF_TIME;
     if (timeDiff < maxAllowedDiff) {
-      return true;
+      isValid = true;
     } else {
       const diffInMinutes = Math.floor(timeDiff / (1000 * 60));
       const diffInHours = Math.floor(timeDiff / (1000 * 60 * 60));
@@ -239,7 +244,7 @@ function validateLogTime(logLine) {
   } else {
       console.error('Unable to get time from logs...');
   }
-  return false;
+  return isValid;
 }
 
 
